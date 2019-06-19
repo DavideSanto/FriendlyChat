@@ -16,7 +16,8 @@
 
 import UIKit
 import Firebase
-import FirebaseAuthUI
+import FirebaseUI
+//import FirebaseAuthUI
 
 // MARK: - FCViewController
 
@@ -53,7 +54,8 @@ class FCViewController: UIViewController, UINavigationControllerDelegate {
     // MARK: Life Cycle
     
     override func viewDidLoad() {
-        self.signedInStatus(isSignedIn: true)
+//        self.signedInStatus(isSignedIn: true)  // assume the user has succesfully authenticated
+        configureAuth()
         
         // TODO: Handle what users see when view loads
     }
@@ -67,10 +69,38 @@ class FCViewController: UIViewController, UINavigationControllerDelegate {
     
     func configureAuth() {
         // TODO: configure firebase authentication
+        // Create a listener for Changes in the authorization state
+        _authHandle =  Auth.auth().addStateDidChangeListener({ (auth: Auth, user: User?) in
+            // refresh table data
+            self.messages.removeAll(keepingCapacity: false)
+            self.messagesTable.reloadData()
+            // check if there us a current user
+            if let activeUser = user {
+                // check if the current app user is teh current Firebase User
+                if self.user != activeUser {
+                    self.user = activeUser
+                    self.signedInStatus(isSignedIn: true)
+                    let name = user!.email?.components(separatedBy: "@")[0]
+                    self.displayName = name ?? "Anonymous"
+                }
+            } else {
+                //user must sign in
+                self.signedInStatus(isSignedIn: false)
+                self.loginSession()
+            }
+        })
     }
     
     func configureDatabase() {
         // TODO: configure database to sync messages
+        //Connect the Application  to Firebase DB by creating a reference to it. 'Database' is the main object used to access Firebase
+        ref = Database.database().reference()
+        // Create a listener [with an handler referring to it] that 'alerts' us any time the data of the Databse is changed
+        _refHandle = ref.child("messages").observe(.childAdded, with: { (snapshot : DataSnapshot) in
+            self.messages.append(snapshot)
+            self.messagesTable.insertRows(at: [IndexPath(row: self.messages.count-1, section: 0)], with: .automatic)
+            self.scrollToBottomMessage()
+        })
     }
     
     func configureStorage() {
@@ -78,7 +108,9 @@ class FCViewController: UIViewController, UINavigationControllerDelegate {
     }
     
     deinit {
-        // TODO: set up what needs to be deinitialized when view is no longer being used
+        // TODO: set up what needs to be deinitialized when view is no longer being used (to save memory we disable the listener)
+        ref.child("messages").removeObserver(withHandle: _refHandle)
+        Auth.auth().removeStateDidChangeListener(_authHandle)
     }
     
     // MARK: Remote Config
@@ -104,12 +136,13 @@ class FCViewController: UIViewController, UINavigationControllerDelegate {
         if (isSignedIn) {
             
             // remove background blur (will use when showing image messages)
-            messagesTable.rowHeight = UITableViewAutomaticDimension
+            messagesTable.rowHeight = UITableView.automaticDimension
             messagesTable.estimatedRowHeight = 122.0
             backgroundBlur.effect = nil
             messageTextField.delegate = self
             
             // TODO: Set up app to send and receive messages when signed in
+            configureDatabase()
         }
     }
     
@@ -122,6 +155,9 @@ class FCViewController: UIViewController, UINavigationControllerDelegate {
     
     func sendMessage(data: [String:String]) {
         // TODO: create method that pushes message to the firebase database
+        var mdata = data
+        mdata[Constants.MessageFields.name] = displayName
+        ref.child("messages").childByAutoId().setValue(mdata)   // This actually WRITE the message into the database
     }
     
     func sendPhotoMessage(photoData: Data) {
@@ -201,12 +237,21 @@ extension FCViewController: UITableViewDelegate, UITableViewDataSource {
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         // dequeue cell
         let cell: UITableViewCell! = messagesTable.dequeueReusableCell(withIdentifier: "messageCell", for: indexPath)
+        
+        let messageSnapshot : DataSnapshot! = messages[indexPath.row]
+        let message = messageSnapshot.value as! [String:String]  // Converts Message Data Snapshot to Dictionary
+        let name = message[Constants.MessageFields.name] ?? "[username]"
+        let text = message[Constants.MessageFields.text] ?? "[message]"
+        cell!.textLabel?.text = name + ": " + text
+        cell!.imageView?.image = self.placeholderImage
+        
         return cell!
-        // TODO: update cell to display message data
+        
+        
     }
     
     func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
-        return UITableViewAutomaticDimension
+        return UITableView.automaticDimension
     }
     
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
@@ -244,14 +289,23 @@ extension FCViewController: UITableViewDelegate, UITableViewDataSource {
 
 extension FCViewController: UIImagePickerControllerDelegate {
     
-    func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [String:Any]) {
-        // constant to hold the information about the photo
-        if let photo = info[UIImagePickerControllerOriginalImage] as? UIImage, let photoData = UIImageJPEGRepresentation(photo, 0.8) {
+    internal func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]) {
+        if let photo = info[UIImagePickerController.InfoKey.originalImage] as? UIImage, let photoData = photo.jpegData(compressionQuality: 0.8) {
             // call function to upload photo message
             sendPhotoMessage(photoData: photoData)
         }
         picker.dismiss(animated: true, completion: nil)
     }
+    
+    
+//    private func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [String:Any]) {
+//        // constant to hold the information about the photo
+//        if let photo = info[UIImagePickerController.InfoKey.originalImage] as? UIImage, let photoData = UIImageJPEGRepresentation(photo, 0.8) {
+//            // call function to upload photo message
+//            sendPhotoMessage(photoData: photoData)
+//        }
+//        picker.dismiss(animated: true, completion: nil)
+//    }
     
     func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
         picker.dismiss(animated: true, completion: nil)
@@ -280,31 +334,31 @@ extension FCViewController: UITextFieldDelegate {
     
     // MARK: Show/Hide Keyboard
     
-    func keyboardWillShow(_ notification: Notification) {
+    @objc func keyboardWillShow(_ notification: Notification) {
         if !keyboardOnScreen {
             self.view.frame.origin.y -= self.keyboardHeight(notification)
         }
     }
     
-    func keyboardWillHide(_ notification: Notification) {
+    @objc func keyboardWillHide(_ notification: Notification) {
         if keyboardOnScreen {
             self.view.frame.origin.y += self.keyboardHeight(notification)
         }
     }
     
-    func keyboardDidShow(_ notification: Notification) {
+    @objc func keyboardDidShow(_ notification: Notification) {
         keyboardOnScreen = true
         dismissKeyboardRecognizer.isEnabled = true
         scrollToBottomMessage()
     }
     
-    func keyboardDidHide(_ notification: Notification) {
+    @objc func keyboardDidHide(_ notification: Notification) {
         dismissKeyboardRecognizer.isEnabled = false
         keyboardOnScreen = false
     }
     
     func keyboardHeight(_ notification: Notification) -> CGFloat {
-        return ((notification as NSNotification).userInfo![UIKeyboardFrameBeginUserInfoKey] as! NSValue).cgRectValue.height
+        return ((notification as NSNotification).userInfo![UIResponder.keyboardFrameBeginUserInfoKey] as! NSValue).cgRectValue.height
     }
     
     func resignTextfield() {
@@ -319,11 +373,12 @@ extension FCViewController: UITextFieldDelegate {
 extension FCViewController {
     
     func subscribeToKeyboardNotifications() {
-        subscribeToNotification(.UIKeyboardWillShow, selector: #selector(keyboardWillShow))
-        subscribeToNotification(.UIKeyboardWillHide, selector: #selector(keyboardWillHide))
-        subscribeToNotification(.UIKeyboardDidShow, selector: #selector(keyboardDidShow))
-        subscribeToNotification(.UIKeyboardDidHide, selector: #selector(keyboardDidHide))
+        subscribeToNotification(UIResponder.keyboardWillShowNotification, selector: #selector(keyboardWillShow))
+        subscribeToNotification(UIResponder.keyboardWillHideNotification, selector: #selector(keyboardWillHide))
+        subscribeToNotification(UIResponder.keyboardDidShowNotification, selector: #selector(keyboardDidShow))
+        subscribeToNotification(UIResponder.keyboardDidHideNotification, selector: #selector(keyboardDidHide))
     }
+    
     
     func subscribeToNotification(_ name: NSNotification.Name, selector: Selector) {
         NotificationCenter.default.addObserver(self, selector: selector, name: name, object: nil)
